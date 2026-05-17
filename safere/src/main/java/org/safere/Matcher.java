@@ -141,6 +141,7 @@ public final class Matcher implements MatchResult {
   private boolean regionStartInsideSurrogatePairContext;
   private boolean opaqueGraphemeRegionContext;
   private boolean lastHitEnd;
+  private boolean lastEngineHitEnd;
   private boolean lastRequireEnd;
   private boolean findExhaustedAfterTerminalEmptyMatch;
   private boolean boundaryStartedRepeatedFindAdvance;
@@ -392,6 +393,7 @@ public final class Matcher implements MatchResult {
       if (allowEmpty) {
         return applyEngineResult(new FullMatchResult(new int[] {0, 0}));
       }
+      this.lastEngineHitEnd = true;
       return applyEngineResult(new NoMatchResult());
     }
 
@@ -435,7 +437,20 @@ public final class Matcher implements MatchResult {
       }
       i += Character.charCount(cp);
     }
+    this.lastEngineHitEnd = true;
     return applyEngineResult(new NoMatchResult());
+  }
+
+  /**
+   * Checks if the remaining input from {@code offset} is a prefix of the literal pattern but
+   * shorter than it, meaning more input could potentially result in a match.
+   */
+  private boolean isPartialLiteralMatch(String literal, int offset) {
+    int remainingLen = text.length() - offset;
+    if (remainingLen >= literal.length()) {
+      return false;
+    }
+    return text.regionMatches(parentPattern.prefixFoldCase(), offset, literal, 0, remainingLen);
   }
 
   private static boolean charClassContains(int[] ranges, long b0, long b1, int cp) {
@@ -692,6 +707,9 @@ public final class Matcher implements MatchResult {
       if (matched) {
         applyEngineResult(new FullMatchResult(new int[] {0, text.length()}));
       } else {
+        if (isPartialLiteralMatch(literal, 0)) {
+          this.lastEngineHitEnd = true;
+        }
         applyEngineResult(new NoMatchResult());
       }
       return hasMatch;
@@ -712,13 +730,16 @@ public final class Matcher implements MatchResult {
         && !prog.hasGraphemeClusterBoundary()
         && (!options.semanticGuards() || !parentPattern.hasNullableAlternation())
         && canUsePikeEquivalentCaptures(prog)) {
-      return applyEngineResult(new FullMatchResult(onePass.search(text, true, prog.numCaptures())));
+      OnePass.SearchResult result = onePass.search(text, true, prog.numCaptures());
+      this.lastEngineHitEnd = result.hitEnd();
+      return applyEngineResult(new FullMatchResult(result.groups()));
     }
 
     // Medium path: use DFA to check if a full match exists.
     if (enginePathOptions().dfa() && !prog.hasGraphemeClusterBoundary()) {
       Dfa.SearchResult dfaResult = dfa().doSearch(text, true, true);
       if (dfaResult != null && !dfaResult.matched()) {
+        this.lastEngineHitEnd = dfaResult.hitEnd();
         return applyEngineResult(new NoMatchResult());
       }
       if (dfaResult != null && dfaResult.pos() != text.length()) {
@@ -738,7 +759,7 @@ public final class Matcher implements MatchResult {
     // may accept a match ending before a trailing \n. In that case, fall back to the NFA
     // which uses longest-match mode for FULL_MATCH and finds the correct full-text match.
     if (result != null && result[1] != text.length()) {
-      result =
+      Nfa.SearchResult nfaResult =
           Nfa.search(
               prog,
               text,
@@ -747,6 +768,8 @@ public final class Matcher implements MatchResult {
               Nfa.Anchor.ANCHORED,
               Nfa.MatchKind.FULL_MATCH,
               prog.numCaptures());
+      result = nfaResult.groups();
+      this.lastEngineHitEnd = nfaResult.hitEnd();
     }
     return applyEngineResult(new FullMatchResult(result));
   }
@@ -827,6 +850,9 @@ public final class Matcher implements MatchResult {
       if (matched) {
         applyEngineResult(new FullMatchResult(new int[] {0, literal.length()}));
       } else {
+        if (isPartialLiteralMatch(literal, 0)) {
+          this.lastEngineHitEnd = true;
+        }
         applyEngineResult(new NoMatchResult());
       }
       return hasMatch;
@@ -840,8 +866,9 @@ public final class Matcher implements MatchResult {
         && !prog.hasGraphemeClusterBoundary()
         && canUsePikeEquivalentCaptures(prog)) {
       OnePass onePass = parentPattern.onePass();
-      return applyEngineResult(
-          new FullMatchResult(onePass.search(text, false, prog.numCaptures())));
+      OnePass.SearchResult result = onePass.search(text, false, prog.numCaptures());
+      this.lastEngineHitEnd = result.hitEnd();
+      return applyEngineResult(new FullMatchResult(result.groups()));
     }
 
     // Medium path: use DFA to check if an anchored match exists.
@@ -1189,6 +1216,8 @@ public final class Matcher implements MatchResult {
     capturesResolved = true;
     groupZeroResolved = true;
 
+    Prog prog = parentPattern.prog();
+
     // Literal fast path: for fully literal patterns with no user capture groups,
     // use String.indexOf() directly.
     String literal = parentPattern.literalMatch();
@@ -1201,6 +1230,13 @@ public final class Matcher implements MatchResult {
         idx = text.indexOf(literal, searchFrom);
       }
       if (idx < 0) {
+        if (!prog.anchorStart()) {
+          this.lastEngineHitEnd = true;
+        } else {
+          if (isPartialLiteralMatch(literal, searchFrom)) {
+            this.lastEngineHitEnd = true;
+          }
+        }
         return applyEngineResult(new NoMatchResult());
       }
       return applyEngineResult(new FullMatchResult(new int[] {idx, idx + literal.length()}));
@@ -1210,8 +1246,6 @@ public final class Matcher implements MatchResult {
     if (options.charClassMatchFastPaths() && singleCharClassRanges != null) {
       return singleCharClassFindFastPath(singleCharClassRanges, searchFrom);
     }
-
-    Prog prog = parentPattern.prog();
 
     Pattern.KeywordAlternation keywordAlternation = parentPattern.keywordAlternation();
     if (options.keywordAlternationFastPath() && !regionActive && keywordAlternation != null) {
@@ -1248,11 +1282,12 @@ public final class Matcher implements MatchResult {
         && (!options.semanticGuards() || !parentPattern.hasNullableAlternation())
         && canUsePikeEquivalentCaptures(prog)
         && text.length() <= ONEPASS_ANCHORED_TEXT_LIMIT) {
-      return applyEngineResult(
-          new FullMatchResult(
-              parentPattern
-                  .onePass()
-                  .search(text, searchFrom, text.length(), false, prog.numCaptures())));
+      OnePass.SearchResult result =
+          parentPattern
+              .onePass()
+              .search(text, searchFrom, text.length(), false, prog.numCaptures());
+      this.lastEngineHitEnd = result.hitEnd();
+      return applyEngineResult(new FullMatchResult(result.groups()));
     }
 
     // Prefix acceleration: if the pattern starts with a literal prefix, skip ahead to where
@@ -1267,6 +1302,16 @@ public final class Matcher implements MatchResult {
         idx = text.indexOf(prefix, searchFrom);
       }
       if (idx < 0) {
+        if (!prog.anchorStart()) {
+          this.lastEngineHitEnd = true;
+        } else {
+          int remainingLen = text.length() - searchFrom;
+          if (remainingLen < prefix.length()
+              && text.regionMatches(
+                  parentPattern.prefixFoldCase(), searchFrom, prefix, 0, remainingLen)) {
+            this.lastEngineHitEnd = true;
+          }
+        }
         return applyEngineResult(new NoMatchResult());
       }
       effectiveStart = idx;
@@ -1279,6 +1324,13 @@ public final class Matcher implements MatchResult {
     if (options.startAcceleration() && ccPrefixAscii != null) {
       int idx = indexOfCharClass(text, ccPrefixAscii, searchFrom);
       if (idx < 0) {
+        if (!prog.anchorStart()) {
+          this.lastEngineHitEnd = true;
+        } else {
+          if (searchFrom == text.length()) {
+            this.lastEngineHitEnd = true;
+          }
+        }
         return applyEngineResult(new NoMatchResult());
       }
       effectiveStart = idx;
@@ -1288,6 +1340,13 @@ public final class Matcher implements MatchResult {
     if (options.startAcceleration() && startAcceleration != null) {
       int idx = nextAcceleratedStart(text, startAcceleration, effectiveStart, prog.unixLines());
       if (idx < 0) {
+        if (!prog.anchorStart()) {
+          this.lastEngineHitEnd = true;
+        } else {
+          if (searchFrom == text.length()) {
+            this.lastEngineHitEnd = true;
+          }
+        }
         return applyEngineResult(new NoMatchResult());
       }
       effectiveStart = idx;
@@ -1311,6 +1370,7 @@ public final class Matcher implements MatchResult {
       if (result != null) {
         return applyEngineResult(new FullMatchResult(result));
       }
+      this.lastEngineHitEnd = true;
       return applyEngineResult(new NoMatchResult());
     }
 
@@ -1391,6 +1451,7 @@ public final class Matcher implements MatchResult {
         if (!budgetExceeded) {
           if (matchStart < 0) {
             // No match possible at end of text — fail immediately without forward scan.
+            this.lastEngineHitEnd = true;
             return applyEngineResult(new NoMatchResult());
           }
 
@@ -1431,6 +1492,7 @@ public final class Matcher implements MatchResult {
     } else {
       fwdResult = dfa().doSearch(text, effectiveStart, false, false);
       if (fwdResult != null && !fwdResult.matched()) {
+        this.lastEngineHitEnd = fwdResult.hitEnd();
         return applyEngineResult(new NoMatchResult());
       }
     }
@@ -1873,6 +1935,7 @@ public final class Matcher implements MatchResult {
       int cp = text.codePointAt(i);
       i += Character.charCount(cp) - 1;
     }
+    this.lastEngineHitEnd = true;
     return applyEngineResult(new NoMatchResult());
   }
 
@@ -2027,6 +2090,9 @@ public final class Matcher implements MatchResult {
       parentPattern.returnBitState(bs);
       if (!bs.budgetExceeded()) {
         // BitState is a complete engine — if it searched and found no match, NFA won't either.
+        if (result == null) {
+          this.lastEngineHitEnd = true;
+        }
         return result;
       }
     }
@@ -2044,8 +2110,19 @@ public final class Matcher implements MatchResult {
     }
     int nfaRegionStart =
         (regionStartInsideSurrogatePairContext || opaqueGraphemeRegionContext) ? regionStart : 0;
-    return Nfa.search(
-        prog, text, startPos, searchLimit, endPos, nfaRegionStart, nfaAnchor, nfaKind, nsubmatch);
+    Nfa.SearchResult nfaResult =
+        Nfa.search(
+            prog,
+            text,
+            startPos,
+            searchLimit,
+            endPos,
+            nfaRegionStart,
+            nfaAnchor,
+            nfaKind,
+            nsubmatch);
+    this.lastEngineHitEnd = nfaResult.hitEnd();
+    return nfaResult.groups();
   }
 
   // ---------------------------------------------------------------------------
@@ -2633,14 +2710,20 @@ public final class Matcher implements MatchResult {
    * this matcher; subsequent operations on this matcher will not affect the returned result.
    *
    * @return a {@link MatchResult} with the state of this matcher
+   * @throws IllegalStateException if no match has yet been attempted, or if the previous match
+   *     operation failed
    */
   public MatchResult toMatchResult() {
-    if (resultStatus == ResultStatus.MATCHED) {
-      eagerFallbackCaptures = true;
+    eagerFallbackCaptures = true;
+    if (hasMatch) {
       resolveCaptures();
     }
-    int[] snapshotGroups = groups == null ? null : groups.clone();
-    return new SnapshotMatchResult(snapshotGroups, text, groupCount(), parentPattern.namedGroups());
+    return new SnapshotMatchResult(
+        groups != null ? groups.clone() : null,
+        text,
+        groupCount(),
+        parentPattern.namedGroups(),
+        hasMatch);
   }
 
   // ---------------------------------------------------------------------------
@@ -2678,7 +2761,8 @@ public final class Matcher implements MatchResult {
       result =
           parentPattern
               .onePass()
-              .search(text, deferredMatchStart, deferredMatchEnd, false, prog.numCaptures());
+              .search(text, deferredMatchStart, deferredMatchEnd, false, prog.numCaptures())
+              .groups();
     } else {
       result =
           searchWithBitStateOrNfa(
@@ -2720,7 +2804,7 @@ public final class Matcher implements MatchResult {
 
   private void updateEndState(MatchOperation operation) {
     if (!hasMatch || groups == null) {
-      lastHitEnd = operation == MatchOperation.FIND;
+      lastHitEnd = lastEngineHitEnd;
       lastRequireEnd = false;
       return;
     }
@@ -2779,22 +2863,24 @@ public final class Matcher implements MatchResult {
           switch (operation) {
             case MATCHES ->
                 Nfa.search(
-                    prog,
-                    probeText,
-                    0,
-                    probeText.length(),
-                    Nfa.Anchor.ANCHORED,
-                    Nfa.MatchKind.FULL_MATCH,
-                    1);
+                        prog,
+                        probeText,
+                        0,
+                        probeText.length(),
+                        Nfa.Anchor.ANCHORED,
+                        Nfa.MatchKind.FULL_MATCH,
+                        1)
+                    .groups();
             case LOOKING_AT, FIND ->
                 Nfa.search(
-                    prog,
-                    probeText,
-                    relativeStart,
-                    probeText.length(),
-                    Nfa.Anchor.ANCHORED,
-                    Nfa.MatchKind.LONGEST_MATCH,
-                    1);
+                        prog,
+                        probeText,
+                        relativeStart,
+                        probeText.length(),
+                        Nfa.Anchor.ANCHORED,
+                        Nfa.MatchKind.LONGEST_MATCH,
+                        1)
+                    .groups();
           };
       if (result != null && result[0] == relativeStart && result[1] > relativeEnd) {
         return true;
@@ -2830,6 +2916,12 @@ public final class Matcher implements MatchResult {
             work.addFirst(current.subs.get(i));
           }
         }
+        case LITERAL_STRING -> {
+          for (int i = 0; i < current.runes.length; i++) {
+            samples.add(new String(Character.toChars(current.runes[i])));
+          }
+        }
+        case LITERAL, CHAR_CLASS, ANY_CHAR -> addSample(current, samples);
         default -> {}
       }
     }
@@ -3011,13 +3103,19 @@ public final class Matcher implements MatchResult {
     private final String text;
     private final int groupCount;
     private final Map<String, Integer> namedGroups;
+    private final boolean hasMatch;
 
     SnapshotMatchResult(
-        int[] groups, String text, int groupCount, Map<String, Integer> namedGroups) {
+        int[] groups,
+        String text,
+        int groupCount,
+        Map<String, Integer> namedGroups,
+        boolean hasMatch) {
       this.groups = groups;
       this.text = text;
       this.groupCount = groupCount;
       this.namedGroups = Collections.unmodifiableMap(namedGroups);
+      this.hasMatch = hasMatch;
     }
 
     @Override
@@ -3061,6 +3159,7 @@ public final class Matcher implements MatchResult {
 
     @Override
     public String group(int group) {
+      checkMatch();
       int s = start(group);
       int e = end(group);
       if (s == -1) {
@@ -3101,7 +3200,7 @@ public final class Matcher implements MatchResult {
     }
 
     private void checkMatch() {
-      if (groups == null) {
+      if (!hasMatch) {
         throw new IllegalStateException("No match found");
       }
     }

@@ -73,6 +73,9 @@ final class Nfa {
     }
   }
 
+  @SuppressWarnings("ArrayRecordComponent")
+  record SearchResult(int[] groups, boolean hitEnd) {}
+
   private final Prog prog;
   private final int ncapture;
 
@@ -85,6 +88,7 @@ final class Nfa {
   private final int regionStart;
 
   private boolean matched;
+  private boolean hitEnd;
   private int[] bestMatch;
   private int bestTerminalEmptyFlags;
 
@@ -119,7 +123,7 @@ final class Nfa {
    *     indices into the text. {@code result[2*i]} is the start of group i, {@code result[2*i+1]}
    *     is the end. -1 means the group did not participate.
    */
-  static int[] search(Prog prog, String text, Anchor anchor, MatchKind kind, int nsubmatch) {
+  static SearchResult search(Prog prog, String text, Anchor anchor, MatchKind kind, int nsubmatch) {
     return search(prog, text, 0, text.length(), text.length(), anchor, kind, nsubmatch);
   }
 
@@ -135,7 +139,7 @@ final class Nfa {
    * @return submatch positions as {@code int[2*nsubmatch]}, or null if no match. Positions are char
    *     indices into the full text.
    */
-  static int[] search(
+  static SearchResult search(
       Prog prog, String text, int startPos, Anchor anchor, MatchKind kind, int nsubmatch) {
     return search(prog, text, startPos, text.length(), text.length(), anchor, kind, nsubmatch);
   }
@@ -155,7 +159,7 @@ final class Nfa {
    * @return submatch positions as {@code int[2*nsubmatch]}, or null if no match. Positions are char
    *     indices into the full text.
    */
-  static int[] search(
+  static SearchResult search(
       Prog prog,
       String text,
       int startPos,
@@ -166,7 +170,7 @@ final class Nfa {
     return search(prog, text, startPos, searchLimit, text.length(), anchor, kind, nsubmatch);
   }
 
-  static int[] search(
+  static SearchResult search(
       Prog prog,
       String text,
       int startPos,
@@ -178,7 +182,7 @@ final class Nfa {
     return search(prog, text, startPos, searchLimit, endPos, 0, anchor, kind, nsubmatch);
   }
 
-  static int[] search(
+  static SearchResult search(
       Prog prog,
       String text,
       int startPos,
@@ -189,7 +193,7 @@ final class Nfa {
       MatchKind kind,
       int nsubmatch) {
     if (prog.start() == 0) {
-      return null;
+      return new SearchResult(null, false);
     }
 
     boolean anchored = (anchor == Anchor.ANCHORED) || prog.anchorStart();
@@ -215,10 +219,10 @@ final class Nfa {
     }
 
     if (!nfa.matched) {
-      return null;
+      return new SearchResult(null, nfa.hitEnd);
     }
     if (kind == MatchKind.FULL_MATCH && nfa.bestMatch[1] != endPos) {
-      return null;
+      return new SearchResult(null, nfa.hitEnd);
     }
 
     int[] result = new int[2 * nsubmatch];
@@ -227,7 +231,7 @@ final class Nfa {
     for (int i = nfa.bestMatch.length; i < result.length; i++) {
       result[i] = -1;
     }
-    return result;
+    return new SearchResult(result, nfa.hitEnd);
   }
 
   static EndStateMatch searchEndState(
@@ -290,6 +294,7 @@ final class Nfa {
    * @param anchored whether to anchor the search at {@code startPos}
    */
   private void doSearch(String text, int startPos, int searchLimit, boolean anchored) {
+    this.hitEnd = false;
     // The set of instruction IDs in each queue, for deduplication in addToThreadq.
     Set<Integer> runqSet = new HashSet<>();
     Set<Integer> nextqSet = new HashSet<>();
@@ -317,11 +322,13 @@ final class Nfa {
       // For unanchored searches without a match, keep trying new positions.
       if (runq.isEmpty()) {
         if (anchored || matched) {
+          this.hitEnd = (pos == endPos);
           break;
         }
         // In unanchored mode with no match yet, advance to the next position
         // and try again. Clear the visited set so instructions can be re-added.
         if (pos >= endPos) {
+          this.hitEnd = true;
           break;
         }
         runqSet.clear();
@@ -347,6 +354,7 @@ final class Nfa {
       }
 
       if (pos >= endPos) {
+        this.hitEnd = true;
         break;
       }
 

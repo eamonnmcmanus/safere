@@ -1856,6 +1856,30 @@ class MatcherTest {
   class HitEndTests {
 
     @Test
+    @DisplayName("hitEnd is true for alternation needing more input (diverges from JDK)")
+    @DisabledForCrosscheck("diverges from JDK")
+    void hitEndTrueForAlternationNeedingMoreInput() {
+      Pattern p = Pattern.compile("abc|abcd");
+      Matcher m = p.matcher("abc");
+      assertThat(m.matches()).isTrue();
+      // SafeRE returns true because it detects that more input ('d') could change the result.
+      // JDK returns false because it stops at the first matching branch.
+      assertThat(m.hitEnd()).isTrue();
+    }
+
+    @Test
+    @DisplayName("hitEnd is true for non-greedy quantifier matches (diverges from JDK)")
+    @DisabledForCrosscheck("diverges from JDK")
+    void hitEndTrueForNonGreedyQuantifierMatches() {
+      Pattern p = Pattern.compile("a*?");
+      Matcher m = p.matcher("a");
+      assertThat(m.matches()).isTrue();
+      // SafeRE returns true because it detects that more input ('a') could change the result.
+      // JDK returns false because it prefers shortest match.
+      assertThat(m.hitEnd()).isTrue();
+    }
+
+    @Test
     @DisplayName("hitEnd is true when a variable-length match reaches end")
     void hitEndTrueForVariableLengthMatchAtEnd() {
       Pattern p = Pattern.compile("\\w+");
@@ -1881,6 +1905,15 @@ class MatcherTest {
     void hitEndNoMatch() {
       Pattern p = Pattern.compile("\\d+");
       Matcher m = p.matcher("no digits");
+      assertThat(m.find()).isFalse();
+      assertThat(m.hitEnd()).isTrue();
+    }
+
+    @Test
+    @DisplayName("hitEnd is true for failed character class match")
+    void hitEndTrueForFailedCharClassMatch() {
+      Pattern p = Pattern.compile("[abc]");
+      Matcher m = p.matcher("xyz");
       assertThat(m.find()).isFalse();
       assertThat(m.hitEnd()).isTrue();
     }
@@ -1943,6 +1976,42 @@ class MatcherTest {
       Matcher m = p.matcher("abx");
       assertThat(m.matches()).isFalse();
       assertThat(m.hitEnd()).isFalse();
+    }
+
+    @Test
+    @DisplayName("hitEnd is true for failed matches() on shorter input")
+    void hitEndTrueForFailedLiteralMatchesShorterInput() {
+      Pattern p = Pattern.compile("abc");
+      Matcher m = p.matcher("ab");
+      assertThat(m.matches()).isFalse();
+      assertThat(m.hitEnd()).isTrue();
+    }
+
+    @Test
+    @DisplayName("hitEnd is true for failed matches() on empty input with quantified char class")
+    void hitEndTrueForFailedCharClassMatchesEmptyInput() {
+      Pattern p = Pattern.compile("[a-z]+");
+      Matcher m = p.matcher("");
+      assertThat(m.matches()).isFalse();
+      assertThat(m.hitEnd()).isTrue();
+    }
+
+    @Test
+    @DisplayName("hitEnd is true for alternation hitting end")
+    void hitEndTrueForAlternationHittingEnd() {
+      Pattern p = Pattern.compile("abc|ab");
+      Matcher m = p.matcher("ab");
+      assertThat(m.matches()).isTrue();
+      assertThat(m.hitEnd()).isTrue();
+    }
+
+    @Test
+    @DisplayName("hitEnd is true for failed lookingAt() on shorter input")
+    void hitEndTrueForFailedLiteralLookingAtShorterInput() {
+      Pattern p = Pattern.compile("abc");
+      Matcher m = p.matcher("ab");
+      assertThat(m.lookingAt()).isFalse();
+      assertThat(m.hitEnd()).isTrue();
     }
 
     @Test
